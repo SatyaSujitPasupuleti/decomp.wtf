@@ -312,7 +312,7 @@ the game.
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.96 | ✓ export | ✓ |
 | **Game Boy Advance** | Beta | ✓ ROM | agbcc | ✓ export | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 | ✓ ds-decomp | ✓ |
-| **Xbox 360** | Experimental CLI analysis | ISO → AES/basic XEX image → draft C | Local compiler adapter; unverified | Not implemented | ✓ |
+| **Xbox 360** | Experimental CLI analysis | ISO → AES/basic XEX image → draft C | Local XDK compilation; OXDK unverified | Not implemented | ✓ |
 | **3DS · PSP · Switch · PC · Xbox** | coming | | | | ✓ |
 
 ### Xbox 360 analysis (this fork)
@@ -356,16 +356,27 @@ analysis project. It does not download an SDK or submit scores to the web app.
 
 ```sh
 python -m decompnet.rom.xbox360_compile new-analysis function.c \
-  --output new-comparison --backend xdk --compiler "/path/to/xdk/cl.exe" \
+  --output new-comparison --backend xdk --xdk "/path/to/extracted/XDK" \
   --symbol my_function --address 0x82410000
 ```
 
 Use `--backend oxdk --compiler /path/to/patched/clang` for OXDK. Stock Clang is
 not supported; unknown Xenon ABI feature warnings are treated as failures.
-Additional local flags use `--flag=VALUE`. Supply includes/types in your source
-context and configure the compiler's normal environment. Draft Ghidra C requires
-manual cleanup before compilation. No XDK/OXDK compiler was available during the
-initial DOAX2 run, so these compiler adapters remain unverified with real tools.
+Additional local flags use `--flag=VALUE`. `--xdk` (or environment variable `XEDK`)
+locates `bin/win32/cl.exe` and configures `INCLUDE`, `LIB`, and `PATH` for the child
+compiler without modifying the system. `--compiler` still accepts an explicit
+executable. Supply includes/types in your source context. Draft Ghidra C requires
+manual cleanup before compilation. For a call-target candidate without `.pdata`
+bounds, `--size BYTE_COUNT` supplies a manually reviewed instruction-aligned extent;
+it must stay within an executable section. Known `.pdata` bounds cannot be overridden.
+
+XDK 3529's compiler (Microsoft 14.00.2909 for PowerPC) was exercised on three
+DOAX2 candidate functions. All compiled, with sizes 12, 72 and 84 bytes matching
+their original extents. The 12-byte candidate differed in three bytes; the others
+had one unresolved call relocation each. No exact or semantic match is claimed.
+The COFF reader supports this compiler's `.pdata` and CodeView procedure-size
+records as well as ordinary function auxiliary symbols. Reports preserve the
+invocation, compiler/source hashes and boundary provenance. OXDK remains unverified.
 Objects with unresolved relocations report `exact_bytes: null`; relocation
 linking, LTCG objects, full game linking and executable rebuilding are not supported.
 Clang output generally differs from the original Microsoft's compiler output.

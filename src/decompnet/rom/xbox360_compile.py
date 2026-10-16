@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
+import hashlib
 from pathlib import Path
 import struct
 import subprocess
@@ -51,6 +53,46 @@ def object_function(data: bytes, name: str) -> tuple[bytes, int]:
     strings = symptr + syms * 18
     string_size = struct.unpack('<I', block(strings, 4))[0]
     table = block(strings, string_size)
+    def function_size(symbol_index):
+        # XDK 3529 emits no function auxiliary symbol even with /Z7. Its
+        # .pdata or CodeView procedure records carry the actual function size.
+        sizes = set()
+        for section in range(count):
+            sh = 20 + section * 40
+            section_name = block(sh, 8).rstrip(b'\0')
+            rawsize, rawptr, relocptr = struct.unpack('<III', block(sh + 16, 12))
+            nreloc = struct.unpack('<H', block(sh + 32, 2))[0]
+            raw = block(rawptr, rawsize)
+            relocs = [struct.unpack('<IIH', block(relocptr + j * 10, 10)) for j in range(nreloc)]
+            if section_name == b'.pdata':
+                for offset, index, kind in relocs:
+                    if index == symbol_index and kind == 2 and offset % 8 == 0 and offset + 8 <= len(raw):
+                        packed = struct.unpack_from('>I', raw, offset + 4)[0]
+                        if packed & 0x40000000:
+                            sizes.add(((packed >> 8) & 0x3fffff) * 4)
+            if section_name != b'.debug$S' or raw[:4] != b'\x04\0\0\0':
+                continue
+            pos = 4
+            while pos + 8 <= len(raw):
+                kind, length = struct.unpack_from('<II', raw, pos)
+                end = pos + 8 + length
+                if end > len(raw):
+                    raise Xbox360Error('truncated CodeView subsection')
+                cursor = pos + 8
+                if kind == 0xf1:
+                    while cursor + 4 <= end:
+                        record_length, record_kind = struct.unpack_from('<HH', raw, cursor)
+                        if record_length < 2 or cursor + 2 + record_length > end:
+                            raise Xbox360Error('invalid CodeView symbol record')
+                        if record_kind in (0x110f, 0x1110) and record_length >= 37:
+                            if any(at == cursor + 32 and index == symbol_index and reloc_kind == 11
+                                   for at, index, reloc_kind in relocs):
+                                sizes.add(struct.unpack_from('<I', raw, cursor + 16)[0])
+                        cursor += record_length + 2
+                pos = (end + 3) & ~3
+        if len(sizes) != 1 or 0 in sizes:
+            raise Xbox360Error('COFF function size missing or inconsistent; compile with /Z7')
+        return sizes.pop()
     i = 0
     while i < syms:
         p = symptr + i * 18
@@ -66,9 +108,7 @@ def object_function(data: bytes, name: str) -> tuple[bytes, int]:
             symbol = rawname.split(b'\0', 1)[0].decode('utf-8', 'replace')
         if symbol == name and typ & 0x20 and 1 <= section_id <= count:
             # COFF function-definition auxiliary record provides TotalSize.
-            if not aux or storage != 2:
-                raise Xbox360Error('COFF function has no explicit size; enable compiler debug symbols')
-            size = struct.unpack('<I', block(p + 18 + 4, 4))[0]
+            size = struct.unpack('<I', block(p + 18 + 4, 4))[0] if aux and storage == 2 else function_size(i)
             sh = 20 + (section_id - 1) * 40
             rawsize, rawptr, relocptr = struct.unpack('<III', block(sh + 16, 12))
             nreloc = struct.unpack('<H', block(sh + 32, 2))[0]
@@ -83,7 +123,8 @@ def object_function(data: bytes, name: str) -> tuple[bytes, int]:
 
 
 def run(project: Path, source: Path, output: Path, compiler: Path, backend: str,
-        symbol: str, address: int, flags: list[str]) -> dict:
+        symbol: str, address: int, flags: list[str], *, xdk: Path | None = None,
+        size: int | None = None) -> dict:
     from ..compiler import check_source
     source = source.resolve()
     check_source(source.read_text(encoding='utf-8'))
@@ -91,9 +132,19 @@ def run(project: Path, source: Path, output: Path, compiler: Path, backend: str,
         raise Xbox360Error(f'compiler not found: {compiler}')
     info = json.loads((project / 'inspection.json').read_text(encoding='utf-8'))
     manifest = json.loads((project / 'functions.json').read_text(encoding='utf-8'))
-    target = next((f for f in manifest['functions'] if f['address'] == address and f['size']), None)
+    target = next((f.copy() for f in manifest['functions'] if f['address'] == address), None)
     if target is None:
-        raise Xbox360Error('comparison requires a bounded function in functions.json')
+        raise Xbox360Error('comparison requires a function candidate in functions.json')
+    if size is not None:
+        if size <= 0 or size % 4 or (target['size'] is not None and target['size'] != size):
+            raise Xbox360Error('explicit size must be instruction aligned and agree with known bounds')
+        target['size'] = size
+    if target['size'] is None:
+        raise Xbox360Error('unbounded candidate: supply --size after reviewing its disassembly')
+    if not any(s['executable'] and info['pe']['image_base'] + s['rva'] <= address
+               and address + target['size'] <= info['pe']['image_base'] + s['rva'] + s['size']
+               for s in info['pe']['sections']):
+        raise Xbox360Error('function extent outside executable sections')
     image = (project / 'image.bin').read_bytes()
     offset = address - info['pe']['image_base']
     if offset < 0 or offset + target['size'] > len(image):
@@ -102,6 +153,15 @@ def run(project: Path, source: Path, output: Path, compiler: Path, backend: str,
     output = output.resolve()
     (output / '.gitignore').write_text('*\n', encoding='utf-8')
     obj = output / ('function.obj' if backend == 'xdk' else 'function.o')
+    environment = os.environ.copy()
+    if backend == 'xdk':
+        xdk = xdk or compiler.resolve().parents[2]
+        if not (xdk / 'include' / 'xbox').is_dir() or not (xdk / 'lib' / 'xbox').is_dir():
+            raise Xbox360Error('XDK root must contain include/xbox and lib/xbox')
+        environment['XEDK'] = str(xdk.resolve()) + os.sep
+        environment['INCLUDE'] = str((xdk / 'include' / 'xbox').resolve())
+        environment['LIB'] = str((xdk / 'lib' / 'xbox').resolve())
+        environment['PATH'] = str(compiler.resolve().parent) + os.pathsep + environment.get('PATH', '')
     if backend == 'xdk':
         command = [str(compiler.resolve()), '/nologo', '/c', '/O2', '/Z7', *flags, str(source), '/Fo' + str(obj)]
     elif backend == 'oxdk':
@@ -112,7 +172,7 @@ def run(project: Path, source: Path, output: Path, compiler: Path, backend: str,
         raise Xbox360Error('unknown compiler backend')
     with (output / 'compiler.log').open('w', encoding='utf-8') as log:
         try:
-            result = subprocess.run(command, cwd=output, stdout=log, stderr=subprocess.STDOUT, timeout=60)
+            result = subprocess.run(command, cwd=output, env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=60)
         except subprocess.TimeoutExpired as exc:
             raise Xbox360Error('compiler timed out; see compiler.log') from exc
     log = (output / 'compiler.log').read_text(encoding='utf-8', errors='replace')
@@ -126,6 +186,9 @@ def run(project: Path, source: Path, output: Path, compiler: Path, backend: str,
                   original_size=len(original), compiled_size=len(code), unresolved_relocations=relocations,
                   exact_bytes=(code == original) if not relocations else None,
                   different_bytes=(sum(a != b for a, b in zip(code, original)) + abs(len(code) - len(original))) if not relocations else None,
+                  bounds_source='explicit' if size is not None else target['source'],
+                  compiler=str(compiler.resolve()), compiler_sha256=hashlib.sha256(compiler.read_bytes()).hexdigest(),
+                  source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), command=command,
                   limitation='Raw byte comparison only; no relocation linking, ABI or semantic verification. Not submitted to web match scoring.')
     (output / 'comparison.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     return report
@@ -136,15 +199,21 @@ def main(argv=None):
     parser.add_argument('project', type=Path)
     parser.add_argument('source', type=Path)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--compiler', type=Path, required=True)
+    parser.add_argument('--compiler', type=Path, help='compiler executable; XDK can instead use --xdk or XEDK')
+    parser.add_argument('--xdk', type=Path, help='extracted XDK root containing bin/win32, include/xbox, lib/xbox')
+    parser.add_argument('--size', type=lambda s: int(s, 0), help='reviewed byte length for an unbounded candidate')
     parser.add_argument('--backend', choices=['xdk', 'oxdk'], required=True)
     parser.add_argument('--symbol', required=True)
     parser.add_argument('--address', type=lambda s: int(s, 0), required=True)
     parser.add_argument('--flag', action='append', default=[], help='additional local compiler option; use --flag=VALUE')
     args = parser.parse_args(argv)
     try:
-        print(json.dumps(run(args.project, args.source, args.output, args.compiler, args.backend,
-                             args.symbol, args.address, args.flag), indent=2))
+        xdk = args.xdk or (Path(os.environ['XEDK']) if os.environ.get('XEDK') else None)
+        compiler = args.compiler or (xdk / 'bin' / 'win32' / 'cl.exe' if xdk and args.backend == 'xdk' else None)
+        if compiler is None:
+            raise Xbox360Error('supply --compiler, or --xdk/XEDK with --backend xdk')
+        print(json.dumps(run(args.project, args.source, args.output, compiler, args.backend,
+                             args.symbol, args.address, args.flag, xdk=xdk, size=args.size), indent=2))
         return 0
     except (OSError, ValueError, ImportError, struct.error) as exc:
         print(f'Xbox 360 compilation failed: {exc}', file=sys.stderr)
