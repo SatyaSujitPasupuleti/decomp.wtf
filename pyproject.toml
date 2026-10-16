@@ -27,6 +27,9 @@ dependencies = [
 Homepage = "https://decomp.wtf"
 Source = "https://github.com/i12bp8/decomp.wtf"
 
+[project.optional-dependencies]
+xbox360 = ["cryptography>=44"]
+
 [project.scripts]
 decompnet = "decompnet.cli:main"
 decomp = "decompnet.app.cli:main"

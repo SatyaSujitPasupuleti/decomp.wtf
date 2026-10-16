@@ -312,10 +312,10 @@ the game.
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.96 | ✓ export | ✓ |
 | **Game Boy Advance** | Beta | ✓ ROM | agbcc | ✓ export | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 | ✓ ds-decomp | ✓ |
-| **Xbox 360** | Experimental inspection/extraction | ISO → XEX2 only | Not implemented | Not implemented | ✓ |
+| **Xbox 360** | Experimental CLI analysis | ISO → AES/basic XEX image → draft C | Local compiler adapter; unverified | Not implemented | ✓ |
 | **3DS · PSP · Switch · PC · Xbox** | coming | | | | ✓ |
 
-### Xbox 360 inspection (this fork)
+### Xbox 360 analysis (this fork)
 
 `decomp xbox360 "GAME.iso" --output "new-output-directory"` locates the XDVDFS
 game partition, extracts its root `default.xex`, and writes `inspection.json`.
@@ -324,22 +324,71 @@ This command runs on Windows with Python; WSL and compiler downloads are not nee
 From a source checkout, set `PYTHONPATH=src` and run
 `python -m decompnet.rom.xbox360 "GAME.iso" --output "new-output-directory"`.
 
-This is **container inspection, not full Xbox 360 decompilation support**. It reads
-XEX2 title/media IDs, entry point, image base, and encryption/compression metadata.
-XEX payload decoding, PowerPC function discovery, a matching Xbox 360 compiler,
-and rebuildable exports remain unimplemented. The GUI recognizes these files and
-explains this limit before creating a matching project. Existing public decomps
-continue to use their own build systems.
+Install the optional AES dependency with `pip install -e ".[xbox360]"`. Add `--load`
+to decrypt retail (or `--devkit`) XEX images with none/basic compression, expand
+zero runs, inspect PE sections and discover functions from `.pdata` and direct
+PowerPC calls. Outputs include `image.bin`, `functions.json`, and SDK library
+version records in `inspection.json`. LZX and delta patches are explicitly rejected.
+
+For draft C, install Ghidra and its required JDK, set `JAVA_HOME`, then run:
+
+```sh
+decomp xbox360 "GAME.iso" --output "new-analysis" --ghidra "/path/to/ghidra" --limit 100
+```
+
+`--limit 0` exports all discovered functions. The output includes a persistent
+Ghidra project, per-function files in `draft-c/`, `decompilation.json` and
+`ghidra.log`. Generic PowerPC64 with 32-bit addresses is used; Xenon VMX128 is
+incomplete, inferred calling conventions/types require correction, and successful
+C export does not prove correct semantics. The report records decompiler warnings.
+Call-target candidates can fail function creation. Indirect-only functions may be
+missing. No original names or types are reconstructed automatically.
+
+**This is not a rebuildable game or a web matching project.** The GUI explains
+the separate CLI workflow. Existing public decomps continue using their build systems.
+
+#### Local compiler experiments
+
+An optional adapter accepts an existing Xbox 360 XDK `cl.exe` or OXDK's patched
+Clang. It compiles one user-prepared C file, reads PowerPCBE COFF or big-endian
+PowerPC ELF function symbols, and compares against a bounded function in the
+analysis project. It does not download an SDK or submit scores to the web app.
+
+```sh
+python -m decompnet.rom.xbox360_compile new-analysis function.c \
+  --output new-comparison --backend xdk --compiler "/path/to/xdk/cl.exe" \
+  --symbol my_function --address 0x82410000
+```
+
+Use `--backend oxdk --compiler /path/to/patched/clang` for OXDK. Stock Clang is
+not supported; unknown Xenon ABI feature warnings are treated as failures.
+Additional local flags use `--flag=VALUE`. Supply includes/types in your source
+context and configure the compiler's normal environment. Draft Ghidra C requires
+manual cleanup before compilation. No XDK/OXDK compiler was available during the
+initial DOAX2 run, so these compiler adapters remain unverified with real tools.
+Objects with unresolved relocations report `exact_bytes: null`; relocation
+linking, LTCG objects, full game linking and executable rebuilding are not supported.
+Clang output generally differs from the original Microsoft's compiler output.
+
+The initial DOAX2 run loaded its executable, found 12,944 valid `.pdata` entries
+and 2,753 extra call targets, created 15,626 Ghidra functions, and exported the
+first 100 as draft C. At least one draft contained an undecoded instruction.
+Its static-library records identify build `2.0.3529`, a toolchain-selection clue
+rather than proof of the exact original compiler or settings.
 
 The reader streams from the image and checks directory extents, cycles, names,
 header sizes and executable size limits. It supports common XDVDFS partition offsets
 (including XGD2/XGD3), not arbitrary container formats or damaged-image recovery.
 Output must be a new directory; its `.gitignore` excludes the locally extracted game
-and report. Never commit game binaries. Regression tests use synthetic images:
+and reports. Never commit game binaries or extracted SDK files. Container regression tests use synthetic images:
 `python -m unittest discover -s tests -p test_xbox360.py` with `PYTHONPATH=src`.
 
 Format references: [Xenia disc reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/disc_image_device.cc)
 and [XEX2 structures](https://github.com/xenia-project/xenia/blob/master/src/xenia/kernel/util/xex2_info.h).
+Image decoding follows the format described by [Xenia's XEX loader](https://github.com/xenia-project/xenia/blob/master/src/xenia/cpu/xex_module.cc);
+runtime entry layout is documented in [XenonRecomp](https://github.com/hedge-dev/XenonRecomp/blob/main/XenonUtils/xbox.h).
+Compiler adapter references: [COFF specification](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
+and [OXDK build flags](https://github.com/MrMilenko/OXDK/blob/main/xbox360/xbox360.mk).
 
 **Recommended platforms: GameCube, Wii and Nintendo 64.** They're the most tested path from dropping in a game to a
 full decomp you can port and mod:

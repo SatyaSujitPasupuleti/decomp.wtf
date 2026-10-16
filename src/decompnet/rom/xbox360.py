@@ -1,8 +1,8 @@
-"""Experimental Xbox 360 disc/XEX inspection, using only the standard library.
+"""Experimental Xbox 360 disc/XEX inspection with optional analysis backends.
 
 Format references (independent implementation): Xenia's disc_image_device.cc and
 kernel/util/xex2_info.h. XDVDFS offsets are partition-relative; XEX words are BE.
-This imports containers and metadata, not a matching-decompilation project.
+Inspection uses the standard library. Loading requires the xbox360 extra.
 """
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ SECTOR = 2048
 PARTITIONS = (0, 0xFB20, 0x20600, 0x2080000, 0xFD90000)
 MAX_DIRECTORY = 32 << 20
 MAX_EXECUTABLE = 256 << 20
-LIMITATION = ("Xbox 360 inspection/extraction is experimental. XEX image loading, "
-              "PowerPC function analysis and an Xbox 360 matching compiler are not implemented. "
-              "Use 'decomp xbox360 GAME.iso --output NEW_DIRECTORY' to inspect and extract default.xex.")
+LIMITATION = ("Xbox 360 uses a separate experimental CLI workflow. "
+              "Use 'decomp xbox360 GAME.iso --output NEW_DIRECTORY --load' for AES/basic XEX loading "
+              "and function discovery; add --ghidra INSTALL_DIRECTORY for draft C. "
+              "The web matching workflow is not supported; draft C is not verified matching source.")
 
 
 class Xbox360Error(ValueError):
@@ -129,6 +130,18 @@ def xex_info(data: bytes) -> dict:
         info.update(title_id=f"{struct.unpack_from('>I', execution, 12)[0]:08X}",
                     media_id=f"{struct.unpack_from('>I', execution)[0]:08X}",
                     disc_number=execution[18], disc_count=execution[19])
+    if 0x200FF in headers:
+        at = headers[0x200FF]
+        length = struct.unpack('>I', block(at, 4))[0]
+        if (length - 4) % 16:
+            raise Xbox360Error('invalid XEX2 static-library table')
+        libraries = []
+        for p in range(at + 4, at + length, 16):
+            record = block(p, 16)
+            major, minor, build, flags = struct.unpack_from('>4H', record, 8)
+            libraries.append(dict(name=record[:8].split(b'\0')[0].decode('ascii', 'replace'),
+                                  version=f'{major}.{minor}.{build}', flags=flags))
+        info['static_libraries'] = libraries
     if security:
         sec = block(security, 0x184)
         info['image_size'] = struct.unpack_from('>I', sec, 4)[0]
@@ -165,24 +178,49 @@ def inspect(src: bytes | Path) -> tuple[bytes, dict]:
         return data, xex_info(data) | dict(partition_offset=disc.partition, executable=entry, root_entries=entries)
 
 
-def run(game: Path, output: Path | None = None) -> dict:
+def run(game: Path, output: Path | None = None, *, load_image=False, devkit=False,
+        ghidra: Path | None = None, limit=100) -> dict:
+    if (load_image or ghidra) and output is None:
+        raise Xbox360Error('--load/--ghidra requires --output')
     data, info = inspect(game)
+    image = analysis = None
+    if load_image or ghidra:
+        from .xex import load
+        from .xbox360_analysis import functions
+        image, loaded = load(data, devkit=devkit)
+        info.update(loaded)
+        analysis = functions(image, info)
+        info['function_count'] = len(analysis['functions'])
+        info['pdata_functions'] = analysis['pdata_functions']
     if output is not None:
         # A new directory prevents accidental replacement of user files or input.
         output.mkdir(parents=True, exist_ok=False)
         (output / '.gitignore').write_text('*\n', encoding='utf-8')
         (output / 'default.xex').write_bytes(data)
+        if image is not None:
+            (output / 'image.bin').write_bytes(image)
+            (output / 'functions.json').write_text(json.dumps(analysis, indent=2) + '\n', encoding='utf-8')
         (output / 'inspection.json').write_text(json.dumps(info, indent=2) + '\n', encoding='utf-8')
+        if ghidra:
+            from .xbox360_analysis import decompile
+            report = decompile(output, ghidra, limit=limit)
+            info['decompilation'] = {k: v for k, v in report.items() if k != 'results'}
+            (output / 'inspection.json').write_text(json.dumps(info, indent=2) + '\n', encoding='utf-8')
     return info
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description='Experimental Xbox 360 ISO/XEX2 inspection; no matching compiler yet')
+    parser = argparse.ArgumentParser(description='Experimental Xbox 360 ISO/XEX2 loading and draft-C analysis')
     parser.add_argument('game', type=Path)
     parser.add_argument('--output', type=Path, help='new directory for default.xex and inspection.json')
+    parser.add_argument('--load', action='store_true', help='decode image and discover functions')
+    parser.add_argument('--devkit', action='store_true', help='use the development-kit encryption key')
+    parser.add_argument('--ghidra', type=Path, help='Ghidra installation for draft-C export (implies --load)')
+    parser.add_argument('--limit', type=int, default=100, help='maximum draft-C functions; 0 exports all')
     args = parser.parse_args(argv)
     try:
-        print(json.dumps(run(args.game, args.output), indent=2))
+        print(json.dumps(run(args.game, args.output, load_image=args.load, devkit=args.devkit,
+                             ghidra=args.ghidra, limit=args.limit), indent=2))
         return 0
     except (OSError, ValueError) as error:
         print(f'Xbox 360 import failed: {error}', file=sys.stderr)

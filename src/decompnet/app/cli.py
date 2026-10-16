@@ -429,6 +429,10 @@ def main(argv: list[str] | None = None) -> int:
     xb = sub.add_parser("xbox360", help="experimental Xbox 360 ISO/XEX inspection and extraction")
     xb.add_argument("game", type=Path)
     xb.add_argument("--output", type=Path, help="new directory for executable and report")
+    xb.add_argument("--load", action="store_true", help="decode XEX and discover functions")
+    xb.add_argument("--devkit", action="store_true")
+    xb.add_argument("--ghidra", type=Path, help="Ghidra installation for draft-C export")
+    xb.add_argument("--limit", type=int, default=100, help="draft-C limit; 0 for all")
     sub.add_parser("setup", help="install the compilers and tools this computer needs")
     sub.add_parser("stop", help="stop the running app")
     sub.add_parser("shortcut", help="add decomp.wtf to your apps menu / desktop")
@@ -471,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     __import__("decompnet").utf8_output()
     if args.cmd == "xbox360":
         from ..rom.xbox360 import main as xbox360_main
-        return xbox360_main([str(args.game)] + (["--output", str(args.output)] if args.output else []))
+        return xbox360_main([str(args.game), "--limit", str(args.limit)]
+                            + (["--output", str(args.output)] if args.output else [])
+                            + (["--load"] if args.load else [])
+                            + (["--devkit"] if args.devkit else [])
+                            + (["--ghidra", str(args.ghidra)] if args.ghidra else []))
     if args.cmd == "mcp":
         from .bridge import main as bridge
         return bridge(args.name)
