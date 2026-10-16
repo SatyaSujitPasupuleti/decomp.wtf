@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 import struct
 from pathlib import Path
 
-from . import chd, gba, n64, overlays, ps2, psx
-from .n64 import RomError
+from . import xbox360
+from .errors import RomError
 
-PLATFORMS = {"n64": "Nintendo 64", "psx": "PlayStation", "ps2": "PlayStation 2", "gba": "Game Boy Advance"}
+PLATFORMS = {"n64": "Nintendo 64", "psx": "PlayStation", "ps2": "PlayStation 2", "gba": "Game Boy Advance",
+             "xbox360": "Xbox 360"}
 SMALL = 64 * 1024 * 1024  # ROMs and programs are read whole; disc images are read from disk
 
 
@@ -25,6 +26,7 @@ class Picked:
 
 
 def _program(data: bytes, name: str = "") -> Picked | None:
+    from . import gba, n64, ps2, psx
     if gba.is_gba(data):
         return Picked("gba", data, "rom.gba", gba.read_info(data), False)
     if data[:4] in n64.MAGIC:
@@ -41,6 +43,13 @@ def _program(data: bytes, name: str = "") -> Picked | None:
 
 def identify(src: bytes | Path, name: str = "") -> Picked:
     """What the user picked: a ROM or program (bytes or a file), or a disc image (read from the file in place)."""
+    if xbox360.probe(src):
+        try:
+            data, info = xbox360.inspect(src)
+        except (ValueError, OSError) as error:
+            raise RomError(f"Xbox disc/XEX import: {error}") from error
+        return Picked("xbox360", data, "default.xex", info, True)
+    from . import chd, psx
     if isinstance(src, (str, Path)):
         path = Path(src)
         name = name or path.name
@@ -69,6 +78,7 @@ def identify(src: bytes | Path, name: str = "") -> Picked:
 
 
 def _from_disc(src) -> Picked:
+    from . import overlays, psx
     raw, boot, platform = psx.from_disc(src)
     picked = _program(raw, boot)
     if picked is None:

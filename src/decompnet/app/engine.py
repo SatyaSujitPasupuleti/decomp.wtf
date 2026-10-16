@@ -355,6 +355,10 @@ class RomNetwork(Network):
             compiler = toolchain if toolchain and toolchain.startswith(("GC/", "Wii/", "DS/")) else None
             return self.forks.create_scratch(project_file, compiler=compiler, log=log)
         picked = detect.identify(data, name)
+        if picked.platform == "xbox360":
+            # Inspection succeeds, but the ROM pipeline below assumes a supported
+            # splitter and compiler. Do not create a misleading empty project.
+            raise NetworkError("Xbox 360 executable recognized. " + picked.info["limitation"])
         rom, info = picked.data, picked.info
         for p in self.store.all("SELECT slug, config FROM projects"):
             if json.loads(p["config"]).get("rom", {}).get("sha1") == info["sha1"]:

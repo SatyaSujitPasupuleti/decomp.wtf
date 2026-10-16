@@ -426,6 +426,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true", help="don't open the browser")
     sub = ap.add_subparsers(dest="cmd")
+    xb = sub.add_parser("xbox360", help="experimental Xbox 360 ISO/XEX inspection and extraction")
+    xb.add_argument("game", type=Path)
+    xb.add_argument("--output", type=Path, help="new directory for executable and report")
     sub.add_parser("setup", help="install the compilers and tools this computer needs")
     sub.add_parser("stop", help="stop the running app")
     sub.add_parser("shortcut", help="add decomp.wtf to your apps menu / desktop")
@@ -466,6 +469,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
     args = ap.parse_args(argv)
     __import__("decompnet").utf8_output()
+    if args.cmd == "xbox360":
+        from ..rom.xbox360 import main as xbox360_main
+        return xbox360_main([str(args.game)] + (["--output", str(args.output)] if args.output else []))
     if args.cmd == "mcp":
         from .bridge import main as bridge
         return bridge(args.name)

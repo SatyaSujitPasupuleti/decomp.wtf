@@ -312,7 +312,34 @@ the game.
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.96 | ✓ export | ✓ |
 | **Game Boy Advance** | Beta | ✓ ROM | agbcc | ✓ export | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 | ✓ ds-decomp | ✓ |
-| **3DS · PSP · Switch · PC · Xbox · Xbox 360** | coming | | | | ✓ |
+| **Xbox 360** | Experimental inspection/extraction | ISO → XEX2 only | Not implemented | Not implemented | ✓ |
+| **3DS · PSP · Switch · PC · Xbox** | coming | | | | ✓ |
+
+### Xbox 360 inspection (this fork)
+
+`decomp xbox360 "GAME.iso" --output "new-output-directory"` locates the XDVDFS
+game partition, extracts its root `default.xex`, and writes `inspection.json`.
+It also accepts an extracted XEX2 file. Without `--output`, it only prints metadata.
+This command runs on Windows with Python; WSL and compiler downloads are not needed.
+From a source checkout, set `PYTHONPATH=src` and run
+`python -m decompnet.rom.xbox360 "GAME.iso" --output "new-output-directory"`.
+
+This is **container inspection, not full Xbox 360 decompilation support**. It reads
+XEX2 title/media IDs, entry point, image base, and encryption/compression metadata.
+XEX payload decoding, PowerPC function discovery, a matching Xbox 360 compiler,
+and rebuildable exports remain unimplemented. The GUI recognizes these files and
+explains this limit before creating a matching project. Existing public decomps
+continue to use their own build systems.
+
+The reader streams from the image and checks directory extents, cycles, names,
+header sizes and executable size limits. It supports common XDVDFS partition offsets
+(including XGD2/XGD3), not arbitrary container formats or damaged-image recovery.
+Output must be a new directory; its `.gitignore` excludes the locally extracted game
+and report. Never commit game binaries. Regression tests use synthetic images:
+`python -m unittest discover -s tests -p test_xbox360.py` with `PYTHONPATH=src`.
+
+Format references: [Xenia disc reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/disc_image_device.cc)
+and [XEX2 structures](https://github.com/xenia-project/xenia/blob/master/src/xenia/kernel/util/xex2_info.h).
 
 **Recommended platforms: GameCube, Wii and Nintendo 64.** They're the most tested path from dropping in a game to a
 full decomp you can port and mod:
